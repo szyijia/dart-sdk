@@ -3500,6 +3500,15 @@ void StubCodeCompiler::GenerateAllocateTypedDataArrayStub(intptr_t cid) {
   __ Ret();
 }
 
+// [patchwing] 混合模式 stub 仅 arm64 实现（iOS/macOS 目标）；其余架构不可达。
+void StubCodeCompiler::GeneratePatchwingInvokeSimulatorStub() {
+  __ Breakpoint();
+}
+
+void StubCodeCompiler::GeneratePatchwingMixedModeCalloutStub() {
+  __ Breakpoint();
+}
+
 }  // namespace compiler
 
 }  // namespace dart

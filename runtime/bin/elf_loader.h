@@ -10,6 +10,22 @@
 typedef struct {
 } Dart_LoadedElf;
 
+namespace dart {
+namespace bin {
+
+/// [patchwing] ELF 加载的映射模式。Shorebird 混合模式等价物：
+/// 热更新 patch 的 snapshot 必须以 kReadOnly（纯数据页）加载——
+/// iOS 禁止将下载内容映射为可执行页，patch 代码由内置模拟器解释执行。
+enum ElfLoadMode {
+  /// 默认：代码段映射为可执行页（原版行为，用于 app 内置 snapshot）。
+  kExecutable,
+  /// patch 专用：全部段映射为只读数据页（iOS 合规，代码由模拟器执行）。
+  kReadOnly,
+};
+
+}  // namespace bin
+}  // namespace dart
+
 /// Load an ELF object from a file.
 ///
 /// On success, return a handle to the library which may be used to close it
@@ -37,13 +53,17 @@ DART_EXPORT Dart_LoadedElf* Dart_LoadELF_Fd(int fd,
 #endif
 
 /// Please see documentation for Dart_LoadElf_Fd.
-DART_EXPORT Dart_LoadedElf* Dart_LoadELF(const char* filename,
-                                         uint64_t file_offset,
-                                         const char** error,
-                                         const uint8_t** vm_snapshot_data,
-                                         const uint8_t** vm_snapshot_instrs,
-                                         const uint8_t** vm_isolate_data,
-                                         const uint8_t** vm_isolate_instrs);
+/// [patchwing] `mode` 控制映射权限（见 ElfLoadMode），默认 kExecutable
+/// 保持原版行为；patch 加载必须传 dart::bin::kReadOnly。
+DART_EXPORT Dart_LoadedElf* Dart_LoadELF(
+    const char* filename,
+    uint64_t file_offset,
+    const char** error,
+    const uint8_t** vm_snapshot_data,
+    const uint8_t** vm_snapshot_instrs,
+    const uint8_t** vm_isolate_data,
+    const uint8_t** vm_isolate_instrs,
+    dart::bin::ElfLoadMode mode = dart::bin::kExecutable);
 
 /// Please see documentation for Dart_LoadElf_Fd.
 DART_EXPORT Dart_LoadedElf* Dart_LoadELF_Memory(

@@ -215,6 +215,8 @@ vm_sources = [
   "os_macos.cc",
   "os_thread.cc",
   "os_thread.h",
+  "patchwing/patchwing_runtime.cc",
+  "patchwing/patchwing_runtime.h",
   "os_thread_absl.cc",
   "os_thread_absl.h",
   "os_thread_android.cc",

@@ -30,8 +30,11 @@ namespace elf {
 class LoadedElf {
  public:
   explicit LoadedElf(std::unique_ptr<Mappable> mappable,
-                     uint64_t elf_data_offset)
-      : mappable_(std::move(mappable)), elf_data_offset_(elf_data_offset) {}
+                     uint64_t elf_data_offset,
+                     dart::bin::ElfLoadMode mode = dart::bin::kExecutable)
+      : mappable_(std::move(mappable)),
+        elf_data_offset_(elf_data_offset),
+        load_mode_(mode) {}
 
   ~LoadedElf();
 
@@ -77,6 +80,9 @@ class LoadedElf {
   // Initialized on a successful Load().
   std::unique_ptr<Mappable> mappable_;
   const uint64_t elf_data_offset_;
+
+  // [patchwing] 映射模式（kExecutable 原版行为 / kReadOnly patch 纯数据页）。
+  const dart::bin::ElfLoadMode load_mode_;
 
   // Initialized on error.
   const char* error_ = nullptr;
@@ -293,7 +299,11 @@ bool LoadedElf::LoadSegments() {
     if (header.flags == (dart::elf::PF_R | dart::elf::PF_W)) {
       map_type = File::kReadWrite;
     } else if (header.flags == (dart::elf::PF_R | dart::elf::PF_X)) {
-      map_type = File::kReadExecute;
+      // [patchwing] kReadOnly 模式只强制代码段映射为纯数据页（iOS 禁止把
+      // 下载内容映射为可执行页，patch 代码由内置模拟器解释执行）；数据段
+      // 必须保持可写——反序列化要往 data image 里写对象指针。
+      map_type = (load_mode_ == dart::bin::kReadOnly) ? File::kReadOnly
+                                                      : File::kReadExecute;
     } else if (header.flags == dart::elf::PF_R) {
       map_type = File::kReadOnly;
     } else {
@@ -447,20 +457,22 @@ DART_EXPORT Dart_LoadedElf* Dart_LoadELF_Fd(int fd,
 }
 #endif
 
-DART_EXPORT Dart_LoadedElf* Dart_LoadELF(const char* filename,
-                                         uint64_t file_offset,
-                                         const char** error,
-                                         const uint8_t** vm_snapshot_data,
-                                         const uint8_t** vm_snapshot_instrs,
-                                         const uint8_t** vm_isolate_data,
-                                         const uint8_t** vm_isolate_instrs) {
+DART_EXPORT Dart_LoadedElf* Dart_LoadELF(
+    const char* filename,
+    uint64_t file_offset,
+    const char** error,
+    const uint8_t** vm_snapshot_data,
+    const uint8_t** vm_snapshot_instrs,
+    const uint8_t** vm_isolate_data,
+    const uint8_t** vm_isolate_instrs,
+    dart::bin::ElfLoadMode mode) {
   std::unique_ptr<Mappable> mappable(Mappable::FromPath(filename));
   if (mappable == nullptr) {
     *error = "Couldn't open file.";
     return nullptr;
   }
   std::unique_ptr<LoadedElf> elf(
-      new LoadedElf(std::move(mappable), file_offset));
+      new LoadedElf(std::move(mappable), file_offset, mode));
 
   if (!elf->Load() ||
       !elf->ResolveSymbols(vm_snapshot_data, vm_snapshot_instrs,

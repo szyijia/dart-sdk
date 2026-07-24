@@ -18,6 +18,7 @@
 #include "vm/code_entry_kind.h"
 #include "vm/compiler/api/type_check_mode.h"
 #include "vm/compiler/assembler/assembler.h"
+#include "vm/patchwing/patchwing_runtime.h"
 #include "vm/compiler/backend/locations.h"
 #include "vm/constants.h"
 #include "vm/ffi_callback_metadata.h"
@@ -3930,15 +3931,210 @@ void StubCodeCompiler::GenerateAllocateTypedDataArrayStub(intptr_t cid) {
     __ Bind(&call_runtime);
   }
 
-  __ EnterStubFrame();
-  __ Push(ZR);                                     // Result slot.
-  __ PushImmediate(target::ToRawSmi(cid));         // Cid
-  __ Push(AllocateTypedDataArrayABI::kLengthReg);  // Array length
-  __ CallRuntime(kAllocateTypedDataRuntimeEntry, 2);
-  __ Drop(2);  // Drop arguments.
-  __ Pop(AllocateTypedDataArrayABI::kResultReg);
+    __ EnterStubFrame();
+    __ Push(ZR);                                     // Result slot.
+    __ PushImmediate(target::ToRawSmi(cid));         // Cid
+    __ Push(AllocateTypedDataArrayABI::kLengthReg);  // Array length
+    __ CallRuntime(kAllocateTypedDataRuntimeEntry, 2);
+    __ Drop(2);  // Drop arguments.
+    __ Pop(AllocateTypedDataArrayABI::kResultReg);
+    __ LeaveStubFrame();
+    __ Ret();
+}
+
+// ---------------------------------------------------------------------------
+// [patchwing] 混合模式 stub ×2（设计：patchwing_runtime.h 头注释 §双向切换）
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using patchwing::CpuContext;
+
+// 栈上临时槽（成对 push 的两个寄存器）在调 C++ 前弹出，保证 GC 遍历
+// [sp, fp) 时不含裸值。
+constexpr intptr_t kCtxX0 = offsetof(CpuContext, x[0]);
+constexpr intptr_t kCtxX2 = offsetof(CpuContext, x[2]);
+constexpr intptr_t kCtxX4 = offsetof(CpuContext, x[4]);
+constexpr intptr_t kCtxX6 = offsetof(CpuContext, x[6]);
+constexpr intptr_t kCtxX8 = offsetof(CpuContext, x[8]);
+constexpr intptr_t kCtxX10 = offsetof(CpuContext, x[10]);
+constexpr intptr_t kCtxX12 = offsetof(CpuContext, x[12]);
+constexpr intptr_t kCtxX14 = offsetof(CpuContext, x[14]);
+constexpr intptr_t kCtxX15 = offsetof(CpuContext, x[15]);
+constexpr intptr_t kCtxX16 = offsetof(CpuContext, x[16]);
+constexpr intptr_t kCtxX17 = offsetof(CpuContext, x[17]);
+constexpr intptr_t kCtxX18 = offsetof(CpuContext, x[18]);
+constexpr intptr_t kCtxX19 = offsetof(CpuContext, x[19]);
+constexpr intptr_t kCtxX20 = offsetof(CpuContext, x[20]);
+constexpr intptr_t kCtxX21 = offsetof(CpuContext, x[21]);
+constexpr intptr_t kCtxX22 = offsetof(CpuContext, x[22]);
+constexpr intptr_t kCtxX23 = offsetof(CpuContext, x[23]);
+constexpr intptr_t kCtxX24 = offsetof(CpuContext, x[24]);
+constexpr intptr_t kCtxX25 = offsetof(CpuContext, x[25]);
+constexpr intptr_t kCtxX26 = offsetof(CpuContext, x[26]);
+constexpr intptr_t kCtxX27 = offsetof(CpuContext, x[27]);
+constexpr intptr_t kCtxX28 = offsetof(CpuContext, x[28]);
+constexpr intptr_t kCtxX29 = offsetof(CpuContext, x[29]);
+constexpr intptr_t kCtxX30 = offsetof(CpuContext, x[30]);
+constexpr intptr_t kCtxSp = offsetof(CpuContext, sp);
+constexpr intptr_t kCtxV0 = offsetof(CpuContext, v[0]);
+constexpr intptr_t kCtxV2 = offsetof(CpuContext, v[2]);
+constexpr intptr_t kCtxV4 = offsetof(CpuContext, v[4]);
+constexpr intptr_t kCtxV6 = offsetof(CpuContext, v[6]);
+constexpr intptr_t kCtxV8 = offsetof(CpuContext, v[8]);
+constexpr intptr_t kCtxV10 = offsetof(CpuContext, v[10]);
+constexpr intptr_t kCtxV12 = offsetof(CpuContext, v[12]);
+constexpr intptr_t kCtxV14 = offsetof(CpuContext, v[14]);
+
+}  // namespace
+
+// native→sim 蹦床。变更函数的 Code entry 全部指向这里（AOT 调用约定进入）。
+// 职责：保存调用点全寄存器到 per-thread malloc ctx → 设 exit frame →
+// 调 C++ InvokeSimulatorImpl（解析 callee、进模拟器执行、结果写回 ctx）→
+// 从 ctx 取结果 → 返回原生调用方。
+void StubCodeCompiler::GeneratePatchwingInvokeSimulatorStub() {
+  __ Comment("PatchwingInvokeSimulatorStub");
+  __ EnterStubFrame();  // stp fp, lr, [sp, #-16]! ; mov fp, sp
+
+  // ---- 保存全寄存器到 malloc ctx（Thread::patchwing_context_）----
+  // 临时栈槽过渡 x15/x16（C++ 调用前弹出，移出 GC 扫描范围）。
+  __ stp(R15, R16, Address(SP, -2 * target::kWordSize, Address::PairPreIndex));
+  __ ldr(R15, Address(THR, target::Thread::patchwing_context_offset()));
+  __ ldr(R16, Address(SP, 1 * target::kWordSize));  // 原 x16
+  __ str(R16, Address(R15, kCtxX16));
+  __ ldr(R16, Address(SP, 0));                      // 原 x15
+  __ str(R16, Address(R15, kCtxX15));
+  __ str(R17, Address(R15, kCtxX17));
+  __ AddImmediate(SP, 2 * target::kWordSize);  // 弹临时槽
+
+  __ stp(R0, R1, Address(R15, kCtxX0, Address::PairOffset));
+  __ stp(R2, R3, Address(R15, kCtxX2, Address::PairOffset));
+  __ stp(R4, R5, Address(R15, kCtxX4, Address::PairOffset));
+  __ stp(R6, R7, Address(R15, kCtxX6, Address::PairOffset));
+  __ stp(R8, R9, Address(R15, kCtxX8, Address::PairOffset));
+  __ stp(R10, R11, Address(R15, kCtxX10, Address::PairOffset));
+  __ stp(R12, R13, Address(R15, kCtxX12, Address::PairOffset));
+  __ str(R14, Address(R15, kCtxX14));
+  __ stp(R18, R19, Address(R15, kCtxX18, Address::PairOffset));
+  __ stp(R20, R21, Address(R15, kCtxX20, Address::PairOffset));
+  // x22(NULL_REG)/x23(HEAP_BITS)/x24(CODE_REG)/x25 原样保存（sim 需要一致）
+  __ stp(R22, R23, Address(R15, kCtxX22, Address::PairOffset));
+  __ stp(R24, R25, Address(R15, kCtxX24, Address::PairOffset));
+  __ stp(R26, R27, Address(R15, kCtxX26, Address::PairOffset));
+  __ str(R28, Address(R15, kCtxX28));
+  // 调用方 fp（native 调用方的帧）：stub 帧的 saved-fp 槽即是。
+  // sim 侧不直接使用（entry frame 走 exit-link），仅留作完整上下文。
+  __ ldr(R16, Address(FP, 0));
+  __ str(R16, Address(R15, kCtxX29));
+  __ str(R30, Address(R15, kCtxX30));   // 原生返回地址（解析 callee + return_pc）
+  // 调用点 SP = stub fp + 16
+  __ AddImmediate(R16, FP, 2 * target::kWordSize);
+  __ str(R16, Address(R15, kCtxSp));
+
+  // v0..v15 低 64 位
+  __ fstp(V0, V1, Address(R15, kCtxV0, Address::PairOffset), kDWord);
+  __ fstp(V2, V3, Address(R15, kCtxV2, Address::PairOffset), kDWord);
+  __ fstp(V4, V5, Address(R15, kCtxV4, Address::PairOffset), kDWord);
+  __ fstp(V6, V7, Address(R15, kCtxV6, Address::PairOffset), kDWord);
+  __ fstp(V8, V9, Address(R15, kCtxV8, Address::PairOffset), kDWord);
+  __ fstp(V10, V11, Address(R15, kCtxV10, Address::PairOffset), kDWord);
+  __ fstp(V12, V13, Address(R15, kCtxV12, Address::PairOffset), kDWord);
+  __ fstp(V14, V15, Address(R15, kCtxV14, Address::PairOffset), kDWord);
+
+  // ---- exit frame 记账（C++ 阶段的 GC 遍历起点边界）----
+  __ str(FP, Address(THR, target::Thread::top_exit_frame_info_offset()));
+
+  // ---- 调 C++ impl（x0=thread, x1=ctx）----
+  // impl 地址经 THR 字段寻址（AOT snapshot 位置无关，不能内嵌绝对地址；
+  // 混合模式激活时由 OnIsolateSnapshotLoaded 填充）。
+  __ mov(R0, THR);
+  __ mov(R1, R15);
+  __ EnterCFrame(0);
+  __ mov(CSP, SP);  // C++ 在 Dart 栈上续跑（与其他 stub 同一约定）
+  __ CallCFunction(
+      Address(THR, target::Thread::patchwing_invoke_impl_offset()));
+  __ SetupCSPFromThread(THR);  // 恢复 CSP 安全边距
+  __ LeaveCFrame();
+
+  // ---- 取回结果（impl 已写回 ctx）----
+  __ ldr(R15, Address(THR, target::Thread::patchwing_context_offset()));
+  __ ldr(R0, Address(R15, kCtxX0));
+  __ fldp(V0, V1, Address(R15, kCtxV0, Address::PairOffset), kDWord);
+
   __ LeaveStubFrame();
-  __ Ret();
+  __ ret();
+}
+
+// sim→native callout。由模拟器 C++（DoMixedModeCallout）经函数指针调用：
+//   x0 = CpuContext*（sim 侧全寄存器）
+//   x1 = target（原生目标地址）
+//   x2 = entry_fp（C++ 侧构建的 entry frame：saved-fp=0 标记 + exit-link
+//        = sim 调用方 fp；栈遍历沿它跨世界，见 patchwing_runtime.h 说明）
+// 职责：全寄存器切换（x15=sim sp，栈参数零拷贝）→ blr target →
+// 结果/callee-saved 回写 ctx → 返回 C++。
+void StubCodeCompiler::GeneratePatchwingMixedModeCalloutStub() {
+  __ Comment("PatchwingMixedModeCalloutStub");
+
+  // ---- C++ 侧保存（CSP/x31 区域，栈遍历不可达）----
+  __ AddImmediate(CSP, -48);
+  __ stp(R19, R20, Address(CSP, 0, Address::PairOffset));
+  __ stp(FP, R30, Address(CSP, 16, Address::PairOffset));
+  __ str(R0, Address(CSP, 32));  // ctx 指针（malloc 偶地址）
+  __ mov(R19, R0);               // R19 = ctx
+  __ mov(R20, R1);               // R20 = target
+
+  // ---- 切栈：x15 = sim sp（被调方直接看到 sim 的栈参数）----
+  __ ldr(R16, Address(R19, kCtxSp));
+  __ mov(SP, R16);
+  __ mov(FP, R2);  // FP = entry_fp（D1 的 saved-fp → entry 标记）
+
+  // ---- 恢复 v0..v15 ----
+  __ fldp(V0, V1, Address(R19, kCtxV0, Address::PairOffset), kDWord);
+  __ fldp(V2, V3, Address(R19, kCtxV2, Address::PairOffset), kDWord);
+  __ fldp(V4, V5, Address(R19, kCtxV4, Address::PairOffset), kDWord);
+  __ fldp(V6, V7, Address(R19, kCtxV6, Address::PairOffset), kDWord);
+  __ fldp(V8, V9, Address(R19, kCtxV8, Address::PairOffset), kDWord);
+  __ fldp(V10, V11, Address(R19, kCtxV10, Address::PairOffset), kDWord);
+  __ fldp(V12, V13, Address(R19, kCtxV12, Address::PairOffset), kDWord);
+  __ fldp(V14, V15, Address(R19, kCtxV14, Address::PairOffset), kDWord);
+
+  // ---- 恢复 x 寄存器（x16/x17/x19/x20 最后）----
+  __ ldp(R0, R1, Address(R19, kCtxX0, Address::PairOffset));
+  __ ldp(R2, R3, Address(R19, kCtxX2, Address::PairOffset));
+  __ ldp(R4, R5, Address(R19, kCtxX4, Address::PairOffset));
+  __ ldp(R6, R7, Address(R19, kCtxX6, Address::PairOffset));
+  __ ldp(R8, R9, Address(R19, kCtxX8, Address::PairOffset));
+  __ ldp(R10, R11, Address(R19, kCtxX10, Address::PairOffset));
+  __ ldp(R12, R13, Address(R19, kCtxX12, Address::PairOffset));
+  __ ldp(R14, R15, Address(R19, kCtxX14, Address::PairOffset));
+  __ ldr(R18, Address(R19, kCtxX18));
+  __ ldp(R21, R22, Address(R19, kCtxX21, Address::PairOffset));
+  __ ldp(R23, R24, Address(R19, kCtxX23, Address::PairOffset));
+  __ ldp(R25, R26, Address(R19, kCtxX25, Address::PairOffset));
+  __ ldp(R27, R28, Address(R19, kCtxX27, Address::PairOffset));
+  __ ldr(R30, Address(R19, kCtxX30));
+
+  __ mov(R16, R20);  // target
+  __ ldp(R19, R20, Address(R19, kCtxX19, Address::PairOffset));
+  __ blr(R16);
+
+  // ---- 原生返回后：结果 + callee-saved 回写 ctx ----
+  __ mov(R16, R19);                  // 暂存 sim x19
+  __ ldr(R17, Address(CSP, 32));     // ctx
+  __ stp(R0, R1, Address(R17, kCtxX0, Address::PairOffset));
+  __ str(R16, Address(R17, kCtxX19));
+  __ stp(R20, R21, Address(R17, kCtxX20, Address::PairOffset));
+  __ stp(R22, R23, Address(R17, kCtxX22, Address::PairOffset));
+  __ stp(R24, R25, Address(R17, kCtxX24, Address::PairOffset));
+  __ stp(R26, R27, Address(R17, kCtxX26, Address::PairOffset));
+  __ str(R28, Address(R17, kCtxX28));
+  __ fstp(V0, V1, Address(R17, kCtxV0, Address::PairOffset), kDWord);
+
+  // ---- 拆 CSP 保存帧，回 C++ ----
+  __ ldp(R19, R20, Address(CSP, 0, Address::PairOffset));
+  __ ldp(FP, R30, Address(CSP, 16, Address::PairOffset));
+  __ AddImmediate(CSP, 48);
+  __ ret();
 }
 
 }  // namespace compiler

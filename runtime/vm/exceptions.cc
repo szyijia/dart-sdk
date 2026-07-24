@@ -23,6 +23,7 @@
 #include "vm/longjump.h"
 #include "vm/object.h"
 #include "vm/object_store.h"
+#include "vm/patchwing/patchwing_runtime.h"
 #include "vm/stack_frame.h"
 #include "vm/stub_code.h"
 #include "vm/symbols.h"
@@ -627,7 +628,9 @@ NO_SANITIZE_SAFE_STACK  // This function manipulates the safestack pointer.
   // exception object in the kExceptionObjectReg register and the stacktrace
   // object (may be raw null) in the kStackTraceObjectReg register.
 
-  if (FLAG_use_simulator) {
+  // [patchwing] 混合模式：异常 handler 在 patch text 内时路由到模拟器。
+  if (FLAG_use_simulator ||
+      patchwing::ShouldHandleInSimulator(program_counter)) {
     Simulator::Current()->JumpToFrame(program_counter, stack_pointer,
                                       frame_pointer, thread);
     UNREACHABLE();

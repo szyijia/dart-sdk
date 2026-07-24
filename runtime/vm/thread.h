@@ -37,6 +37,10 @@
 
 namespace dart {
 
+namespace patchwing {
+struct CpuContext;
+}  // namespace patchwing
+
 class AbstractType;
 class ApiLocalScope;
 class Array;
@@ -741,6 +745,29 @@ class Thread : public ThreadState, public IntrusiveDListEntry<Thread> {
   }
   static intptr_t top_exit_frame_info_offset() {
     return OFFSET_OF(Thread, top_exit_frame_info_);
+  }
+
+  // [patchwing] 混合模式 trampoline 上下文缓冲（见字段处注释）。
+  patchwing::CpuContext* patchwing_context() const {
+    return patchwing_context_;
+  }
+  void set_patchwing_context(patchwing::CpuContext* value) {
+    patchwing_context_ = value;
+  }
+  static intptr_t patchwing_context_offset() {
+    return OFFSET_OF(Thread, patchwing_context_);
+  }
+
+  // [patchwing] sim→sim 调用的返回地址桥接（见字段处注释）。
+  uword patchwing_pending_sim_lr() const { return patchwing_pending_sim_lr_; }
+  void set_patchwing_pending_sim_lr(uword value) {
+    patchwing_pending_sim_lr_ = value;
+  }
+
+  // [patchwing] 蹦床 impl 函数指针（见字段处注释）。
+  void set_patchwing_invoke_impl(uword value) { patchwing_invoke_impl_ = value; }
+  static intptr_t patchwing_invoke_impl_offset() {
+    return OFFSET_OF(Thread, patchwing_invoke_impl_);
   }
 
   Heap* heap() const;
@@ -1450,6 +1477,16 @@ class Thread : public ThreadState, public IntrusiveDListEntry<Thread> {
   // bit.
   uword stack_overflow_flags_ = 0;
   uword volatile top_exit_frame_info_ = 0;
+  // [patchwing] 混合模式 trampoline 的 per-thread 全寄存器上下文缓冲
+  // （malloc，trampoline stub 经 patchwing_context_offset 直接寻址）。
+  patchwing::CpuContext* patchwing_context_ = nullptr;
+  // [patchwing] sim→sim 调用经 callout 到蹦床时，callout 把 sim 返回地址
+  // 暂存于此，蹦床 impl 读取并清零（仅 C++ 访问，不入 offsets）。
+  uword patchwing_pending_sim_lr_ = 0;
+  // [patchwing] 蹦床 impl 的 C++ 函数指针（混合模式激活时填充；
+  // trampoline stub 经 THR 偏移寻址——AOT snapshot 位置无关，不能内嵌
+  // 绝对地址）。
+  uword patchwing_invoke_impl_ = 0;
   StoreBufferBlock* store_buffer_block_ = nullptr;
   MarkingStackBlock* old_marking_stack_block_ = nullptr;
   MarkingStackBlock* new_marking_stack_block_ = nullptr;

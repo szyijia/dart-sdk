@@ -62,6 +62,9 @@ class DispatchTable {
   // Dispatch table array pointer to put into the dispatch table register.
   const uword* ArrayOrigin() const;
 
+  // [patchwing] 混合模式路由改写用（entry 重定向到 base 原生或蹦床）。
+  uword* MutableArray() { return array_.get(); }
+
  private:
   uword* array() { return array_.get(); }
 

@@ -90,6 +90,8 @@ namespace dart {
   V(OptimizeFunction)                                                          \
   V(InvokeDartCode)                                                            \
   V(InvokeDartCodeFromBytecode)                                                \
+  V(PatchwingInvokeSimulator)                                                  \
+  V(PatchwingMixedModeCallout)                                                 \
   V(DebugStepCheck)                                                            \
   V(SwitchableCallMiss)                                                        \
   V(MonomorphicSmiableCheck)                                                   \

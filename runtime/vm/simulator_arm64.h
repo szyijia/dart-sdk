@@ -36,6 +36,10 @@ typedef struct {
   } bits;
 } simd_value_t;
 
+namespace patchwing {
+struct CpuContext;
+}  // namespace patchwing
+
 class Simulator {
  public:
   static constexpr uword kSimulatorStackUnderflowSize = 64;
@@ -101,6 +105,20 @@ class Simulator {
                int64_t parameter3,
                bool fp_return = false,
                bool fp_args = false);
+
+  // [patchwing] 混合模式执行入口：从 ctx 灌入全寄存器（共享真实栈），
+  // pc=entry（patch text 内），LR=return_pc（本层返回检测值，也是
+  // sim frame1 saved-lr，保证调用方帧 pc 正确分类），FP=entry_fp（impl
+  // 构建的 entry frame）。返回前把 sim 侧结果（x0/x1/v0/v1）写回 ctx。
+  void MixedModeExecute(uword entry,
+                        uword return_pc,
+                        uword entry_fp,
+                        patchwing::CpuContext* ctx);
+
+  // [patchwing] 混合模式：pc 离开 patch text 时的 sim→native 切换。
+  // 全寄存器打包后经 StubCode::PatchwingMixedModeCallout 原生执行 target，
+  // 返回后恢复 sim 状态并在调用点之后继续。
+  void DoMixedModeCallout(uword target);
   void DoRedirectedFfiCallback(Thread* thread,
                                CallbackContext* ctxt,
                                CallbackMetadata* out);
@@ -129,6 +147,10 @@ class Simulator {
   // simulated execution, so that the simulator can "return" to the native
   // C code.
   static constexpr uword kEndSimulatingPC = -2;
+
+  // [patchwing] 混合模式状态（MixedModeExecute 进入时设置，嵌套保存/恢复）。
+  uword mixed_mode_return_pc_ = 0;  // 本层 sim 会话的返回检测 pc
+  bool mixed_mode_active_ = false;  // Execute 循环是否启用 pc 出界检查
 
   // CPU state.
   int64_t registers_[kNumberOfCpuRegisters];

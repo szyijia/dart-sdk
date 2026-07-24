@@ -366,6 +366,8 @@
   FIELD(Thread, suspend_state_init_sync_star_entry_point_offset)               \
   FIELD(Thread, suspend_state_suspend_sync_star_at_start_entry_point_offset)   \
   FIELD(Thread, suspend_state_handle_exception_entry_point_offset)             \
+  FIELD(Thread, patchwing_context_offset)                                      \
+  FIELD(Thread, patchwing_invoke_impl_offset)                                  \
   FIELD(Thread, top_exit_frame_info_offset)                                    \
   FIELD(Thread, top_offset)                                                    \
   FIELD(Thread, top_resource_offset)                                           \

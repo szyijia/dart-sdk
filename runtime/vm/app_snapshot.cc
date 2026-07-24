@@ -25,6 +25,7 @@
 #include "vm/native_entry.h"
 #include "vm/object.h"
 #include "vm/object_store.h"
+#include "vm/patchwing/patchwing_runtime.h"
 #include "vm/program_visitor.h"
 #include "vm/raw_object_fields.h"
 #include "vm/stub_code.h"
@@ -10207,8 +10208,12 @@ ApiErrorPtr FullSnapshotReader::ReadProgramSnapshot() {
     thread_->isolate_group()->SetupImagePage(data_image_,
                                              /* is_executable */ false);
     ASSERT(instructions_image_ != nullptr);
-    thread_->isolate_group()->SetupImagePage(instructions_image_,
-                                             /* is_executable */ true);
+    // [patchwing] 混合模式激活时，本 image 是 patch 指令页（kReadOnly
+    // 纯数据映射）：必须按非可执行注册，避免 WriteProtectCode 在收尾时
+    // 对未签名页 mprotect(RX)（iOS 必然拒绝）。
+    thread_->isolate_group()->SetupImagePage(
+        instructions_image_,
+        /* is_executable */ !patchwing::IsActive());
   }
 
   ProgramDeserializationRoots roots(thread_->isolate_group()->object_store());
@@ -10229,6 +10234,13 @@ ApiErrorPtr FullSnapshotReader::ReadProgramSnapshot() {
   }
 
   InitializeBSS();
+
+  // [patchwing] 混合模式路由改写（patch 激活时 no-op 以外的一次性设置）：
+  // 未变函数 Code entry 跳 base 原生、变更函数进模拟器蹦床、dispatch table
+  // 同步改写、为 base text 追加 InstructionsTable。
+  if (Snapshot::IncludesCode(kind_)) {
+    patchwing::OnIsolateSnapshotLoaded(thread_, instructions_image_);
+  }
 
   return ApiError::null();
 }

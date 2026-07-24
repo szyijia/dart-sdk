@@ -18,8 +18,10 @@
 #include "vm/image_snapshot.h"
 #include "vm/native_arguments.h"
 #include "vm/os_thread.h"
+#include "vm/patchwing/patchwing_runtime.h"
 #include "vm/runtime_entry.h"
 #include "vm/stack_frame.h"
+#include "vm/stub_code.h"
 
 namespace dart {
 
@@ -3964,11 +3966,134 @@ void Simulator::ExecuteNoTrace() {
   // Fast version of the dispatch loop without checking whether the simulator
   // should be stopping at a particular executed instruction.
   while (program_counter != kEndSimulatingPC) {
+    // [patchwing] 混合模式：sim 函数返回到本层 return_pc → 结束本次执行。
+    // 必须在 IsPatchPc 判定之前检查（return_pc 可能是 patch text 内地址）。
+    if (mixed_mode_active_ && program_counter == mixed_mode_return_pc_) {
+      break;
+    }
+    // [patchwing] 混合模式：pc 离开 patch text → callout 到原生代码
+    // （base 原生函数 / vm stub / 蹦床嵌套），返回后在调用点之后继续。
+    if (mixed_mode_active_ && !patchwing::IsPatchPc(program_counter)) {
+      DoMixedModeCallout(program_counter);
+      program_counter = get_pc();
+      continue;
+    }
     Instr* instr = reinterpret_cast<Instr*>(program_counter);
     icount_++;
     InstructionDecodeImpl(instr);
     program_counter = get_pc();
   }
+}
+
+// [patchwing] 混合模式执行入口。从 ctx 灌入全寄存器（共享真实栈），
+// 运行 Execute 直到 sim 函数返回到 return_pc。结果写回 ctx。
+void Simulator::MixedModeExecute(uword entry,
+                                 uword return_pc,
+                                 uword entry_fp,
+                                 patchwing::CpuContext* ctx) {
+  const uword saved_return_pc = mixed_mode_return_pc_;
+  const bool saved_active = mixed_mode_active_;
+
+  // 灌入整数寄存器 x0..x30（含 THR/PP/DT/NULL_REG/HEAP_BITS，与原生一致）。
+  for (int i = 0; i <= 30; i++) {
+    set_register(nullptr, static_cast<Register>(i), ctx->x[i]);
+  }
+  // 共享真实栈：SP(x15) = 调用点 sp（栈参数零拷贝）；
+  // FP = impl 构建的 entry frame（sim 帧链经 exit-link 跨世界，见
+  // patchwing_runtime.h 的栈纪律说明）。
+  set_register(nullptr, SPREG, ctx->sp, R31IsSP);
+  set_register(nullptr, FP, entry_fp);
+  set_register(nullptr, LR, return_pc);
+  // CSP(x31)：与原生过渡同一约定（saved_stack_limit - 4096 安全边距）。
+  set_register(nullptr, R31,
+               Thread::Current()->saved_stack_limit() - 4096, R31IsSP);
+  // v0..v15 低 64 位。
+  for (int i = 0; i <= 15; i++) {
+    set_vregisterd(static_cast<VRegister>(i), 0, bit_cast<int64_t>(ctx->v[i]));
+    set_vregisterd(static_cast<VRegister>(i), 1, 0);
+  }
+
+  mixed_mode_return_pc_ = return_pc;
+  mixed_mode_active_ = true;
+
+  set_pc(entry);
+  Execute();
+
+  // 结果写回 ctx（x0/x1 整数结果、v0/v1 浮点结果）。
+  ctx->x[0] = get_register(R0);
+  ctx->x[1] = get_register(R1);
+  ctx->v[0] = bit_cast<double>(get_vregisterd(V0, 0));
+  ctx->v[1] = bit_cast<double>(get_vregisterd(V1, 0));
+
+  mixed_mode_return_pc_ = saved_return_pc;
+  mixed_mode_active_ = saved_active;
+}
+
+// [patchwing] sim→native callout。pc 离开 patch text 时触发：
+// 打包 sim 全寄存器 → 经 StubCode::PatchwingMixedModeCallout 原生执行
+// target → 结果/callee-saved 回灌 sim → pc = sim LR（调用点之后）。
+void Simulator::DoMixedModeCallout(uword target) {
+#if !defined(HOST_ARCH_ARM64)
+  FATAL("[patchwing] mixed-mode callout requires ARM64 host");
+#else
+  // We can't instrument the runtime.
+  memory_.FlushAll();
+
+  SimulatorSetjmpBuffer buffer(this);
+  if (!DART_SETJMP(buffer.buffer_)) {
+    const int64_t saved_lr = get_register(LR);
+
+    patchwing::CpuContext ctx;
+    for (int i = 0; i <= 30; i++) {
+      ctx.x[i] = get_register(static_cast<Register>(i));
+    }
+    ctx.sp = get_register(SPREG);
+    for (int i = 0; i <= 15; i++) {
+      ctx.v[i] = bit_cast<double>(get_vregisterd(static_cast<VRegister>(i), 0));
+    }
+
+    // A-case（sim→sim 经蹦床嵌套）：把 sim 返回地址桥接给蹦床 impl，
+    // 否则蹦床只能看到 callout stub 内的返回地址（对 sim 无意义）。
+    Thread* thread = Thread::Current();
+    if (target == StubCode::PatchwingInvokeSimulator().EntryPoint()) {
+      thread->set_patchwing_pending_sim_lr(saved_lr);
+    }
+
+    // 为原生侧构建 entry frame（saved-fp=0 标记 + exit-link=sim 调用方
+    // fp）——栈遍历经此跨世界推进，原生被调方的帧不再以 fp 链直接
+    // 指回 sim 帧（避免 sim 帧被保守扫描）。
+    patchwing::MixedModeEntryFrame entry_frame = {};
+    entry_frame.exit_link = ctx.x[29];
+    entry_frame.saved_fp = 0;
+    entry_frame.saved_pc = saved_lr;
+    const uword entry_fp =
+        reinterpret_cast<uword>(&entry_frame.saved_fp);
+
+    using CalloutFn = void (*)(patchwing::CpuContext*, uword, uword);
+    auto callout = reinterpret_cast<CalloutFn>(
+        StubCode::PatchwingMixedModeCallout().EntryPoint());
+    callout(&ctx, target, entry_fp);
+
+    // 结果回灌：x0/x1/v0/v1 + callee-saved（原生被调方已按 ABI 恢复，
+    // 且其帧上的保存槽经受了 GC 遍历，值是最新的）。
+    set_register(nullptr, R0, ctx.x[0]);
+    set_register(nullptr, R1, ctx.x[1]);
+    for (int i = 19; i <= 28; i++) {
+      set_register(nullptr, static_cast<Register>(i), ctx.x[i]);
+    }
+    set_vregisterd(V0, 0, bit_cast<int64_t>(ctx.v[0]));
+    set_vregisterd(V1, 0, bit_cast<int64_t>(ctx.v[1]));
+
+    // volatile 寄存器按 ABI 视为被调用方破坏（不恢复）。
+    ClobberVolatileRegisters();
+
+    // 在调用点之后继续（saved_lr = bl/blr 设置的返回地址）。
+    set_pc(saved_lr);
+  } else {
+    // Coming via long jump from a throw. Continue to exception handler.
+    // sim pc/sp/fp 已由 Simulator::JumpToFrame 设置，直接返回 Execute 继续。
+  }
+#endif
 }
 
 void Simulator::ExecuteTrace() {
@@ -4119,8 +4244,14 @@ void Simulator::JumpToFrame(uword pc, uword sp, uword fp, Thread* thread) {
   // Clear top exit frame.
   thread->set_top_exit_frame_info(0);
   // Restore pool pointer.
-  int64_t code =
-      *reinterpret_cast<int64_t*>(fp + kPcMarkerSlotFromFp * kWordSize);
+  // [patchwing] AOT 帧没有 pc marker（EnterDartFrame 在 precompiled 模式
+  // 不推 marker），这里读到的只会是垃圾；AOT callee 也不使用 CODE_REG，
+  // 直接置空。PP 走 thread->global_object_pool()（patch 全局池）。
+  int64_t code = FLAG_precompiled_mode
+                     ? 0
+                     : *reinterpret_cast<int64_t*>(fp +
+                                                   kPcMarkerSlotFromFp *
+                                                       kWordSize);
   int64_t pp = FLAG_precompiled_mode
                    ? static_cast<int64_t>(thread->global_object_pool())
                    : *reinterpret_cast<int64_t*>(

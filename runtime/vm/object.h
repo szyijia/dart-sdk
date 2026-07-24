@@ -3265,6 +3265,16 @@ class Function : public Object {
     return function->untag()->entry_point_;
   }
 
+#if defined(DART_PRECOMPILED_RUNTIME)
+  // [patchwing] 混合模式路由改写：同步 Function 缓存的 entry（与对应
+  // Code 改写后保持一致）。
+  void PatchwingSetEntryCache(uword entry_point,
+                              uword unchecked_entry_point) const {
+    untag()->entry_point_ = entry_point;
+    untag()->unchecked_entry_point_ = unchecked_entry_point;
+  }
+#endif
+
   static intptr_t entry_point_offset(
       CodeEntryKind entry_kind = CodeEntryKind::kNormal) {
     switch (entry_kind) {
@@ -7064,6 +7074,21 @@ class Code : public Object {
     return MonomorphicEntryPoint() + untag()->unchecked_offset_;
 #endif
   }
+
+#if defined(DART_PRECOMPILED_RUNTIME)
+  // [patchwing] 混合模式路由改写：直接写 4 个 entry 字段（AOT 下 entry
+  // 缓存只在反序列化时设置一次，这里按设计意图二次改写）。
+  void PatchwingSetEntryPoints(uword entry_point,
+                               uword unchecked_entry_point,
+                               uword monomorphic_entry_point,
+                               uword monomorphic_unchecked_entry_point) const {
+    untag()->entry_point_ = entry_point;
+    untag()->unchecked_entry_point_ = unchecked_entry_point;
+    untag()->monomorphic_entry_point_ = monomorphic_entry_point;
+    untag()->monomorphic_unchecked_entry_point_ =
+        monomorphic_unchecked_entry_point;
+  }
+#endif
 
   // Returns the size of [instructions()].
   uword Size() const { return PayloadSizeOf(ptr()); }
